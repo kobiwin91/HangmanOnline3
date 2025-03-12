@@ -1,0 +1,272 @@
+// Game state object
+const gameState = {
+    currentUser: null,
+    playerName: '',
+    currentGame: null,
+    isHost: false,
+    gameCode: null,
+    word: '',
+    guessedLetters: new Set(),
+    mistakes: 0,
+    maxMistakes: 10,
+    timer: null,
+    timerStart: null,
+    soundEnabled: true,
+    gameStatus: 'waiting' // waiting, playing, finished
+};
+
+// Sound effects
+const sounds = {
+    correct: new Audio('sounds/correct.mp3'),
+    wrong: new Audio('sounds/wrong.mp3'),
+    win: new Audio('sounds/win.mp3'),
+    lose: new Audio('sounds/lose.mp3')
+};
+
+// Firebase config and initialization
+const firebaseConfig = {
+    // Add your Firebase config here
+};
+
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const firestore = firebase.firestore();
+
+// Authentication functions
+function register() {
+    const email = document.getElementById('registerEmail').value;
+    const password = document.getElementById('registerPassword').value;
+    const username = document.getElementById('registerUsername').value;
+
+    auth.createUserWithEmailAndPassword(email, password)
+        .then((userCredential) => {
+            return firestore.collection('users').doc(userCredential.user.uid).set({
+                username: username,
+                score: 0,
+                gamesPlayed: 0,
+                achievements: []
+            });
+        })
+        .then(() => {
+            gameState.playerName = username;
+            showScreen('gameMode');
+        })
+        .catch((error) => alert(error.message));
+}
+
+function login() {
+    const email = document.getElementById('loginEmail').value;
+    const password = document.getElementById('loginPassword').value;
+
+    auth.signInWithEmailAndPassword(email, password)
+        .then(() => showScreen('gameMode'))
+        .catch((error) => alert(error.message));
+}
+
+function logout() {
+    auth.signOut()
+        .then(() => {
+            gameState.currentUser = null;
+            gameState.playerName = '';
+            showScreen('welcome');
+        })
+        .catch((error) => alert(error.message));
+}
+
+// Game functions
+function startOnlineGame() {
+    const gameCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    gameState.gameCode = gameCode;
+    gameState.isHost = true;
+
+    firestore.collection('games').doc(gameCode).set({
+        host: gameState.currentUser.uid,
+        hostName: gameState.playerName,
+        guest: null,
+        guestName: null,
+        status: 'waiting',
+        word: '',
+        guessedLetters: [],
+        mistakes: 0,
+        startTime: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
+        gameState.currentGame = gameCode;
+        showScreen('game');
+        document.getElementById('gameCodeDisplay').textContent = gameCode;
+    });
+}
+
+function joinGame(code) {
+    firestore.collection('games').doc(code).get()
+        .then((doc) => {
+            if (doc.exists && doc.data().status === 'waiting') {
+                gameState.gameCode = code;
+                gameState.isHost = false;
+                return firestore.collection('games').doc(code).update({
+                    guest: gameState.currentUser.uid,
+                    guestName: gameState.playerName,
+                    status: 'playing'
+                });
+            } else {
+                throw new Error('Game not found or already in progress');
+            }
+        })
+        .then(() => {
+            gameState.currentGame = code;
+            showScreen('game');
+        })
+        .catch((error) => alert(error.message));
+}
+
+function submitWord() {
+    if (!gameState.isHost) return;
+    
+    const word = document.getElementById('wordInput').value.trim();
+    if (!/^[\u0590-\u05FF\s]+$/.test(word)) {
+        alert('Please enter a valid Hebrew word');
+        return;
+    }
+
+    firestore.collection('games').doc(gameState.gameCode).update({
+        word: word,
+        startTime: firebase.firestore.FieldValue.serverTimestamp()
+    });
+}
+
+function guessLetter(letter) {
+    if (gameState.isHost) return;
+    
+    if (!gameState.guessedLetters.has(letter)) {
+        gameState.guessedLetters.add(letter);
+        
+        const isCorrectGuess = gameState.word.includes(letter);
+        if (isCorrectGuess) {
+            if (gameState.soundEnabled) sounds.correct.play();
+        } else {
+            if (gameState.soundEnabled) sounds.wrong.play();
+            gameState.mistakes++;
+            updateHangmanAnimation();
+        }
+
+        firestore.collection('games').doc(gameState.gameCode).update({
+            guessedLetters: Array.from(gameState.guessedLetters),
+            mistakes: gameState.mistakes
+        });
+
+        checkGameEnd();
+    }
+}
+
+function checkGameEnd() {
+    const allLettersGuessed = [...gameState.word].every(letter => 
+        gameState.guessedLetters.has(letter));
+    
+    if (allLettersGuessed) {
+        if (gameState.soundEnabled) sounds.win.play();
+        endGame('win');
+    } else if (gameState.mistakes >= gameState.maxMistakes) {
+        if (gameState.soundEnabled) sounds.lose.play();
+        endGame('lose');
+    }
+}
+
+function endGame(result) {
+    gameState.gameStatus = 'finished';
+    updateScore(result);
+    showGameResults();
+}
+
+function updateScore(result) {
+    if (result === 'win') {
+        const timeBonus = Math.max(0, 1000 - (Date.now() - gameState.timerStart));
+        const score = 100 + timeBonus + (gameState.maxMistakes - gameState.mistakes) * 10;
+        
+        firestore.collection('users').doc(gameState.currentUser.uid).update({
+            score: firebase.firestore.FieldValue.increment(score),
+            gamesPlayed: firebase.firestore.FieldValue.increment(1)
+        });
+    }
+}
+
+function showGameResults() {
+    // Implement game results display
+}
+
+function resetGame() {
+    gameState.guessedLetters.clear();
+    gameState.mistakes = 0;
+    gameState.word = '';
+    gameState.timerStart = Date.now();
+    
+    firestore.collection('games').doc(gameState.gameCode).update({
+        status: 'playing',
+        word: '',
+        guessedLetters: [],
+        mistakes: 0,
+        startTime: firebase.firestore.FieldValue.serverTimestamp()
+    });
+}
+
+function leaveGame() {
+    if (gameState.currentGame) {
+        firestore.collection('games').doc(gameState.currentGame).delete();
+    }
+    gameState.currentGame = null;
+    gameState.gameCode = null;
+    gameState.isHost = false;
+    showScreen('gameMode');
+}
+
+// UI functions
+function showScreen(screenId) {
+    const screens = ['welcome', 'login', 'register', 'gameMode', 'game', 'leaderboard'];
+    screens.forEach(screen => {
+        document.getElementById(`${screen}Screen`).style.display = 
+            screen === screenId ? 'block' : 'none';
+    });
+}
+
+function showLoginScreen() {
+    showScreen('login');
+}
+
+function showRegisterScreen() {
+    showScreen('register');
+}
+
+function updateHangmanAnimation() {
+    // Implement hangman animation based on mistakes
+}
+
+function toggleSound() {
+    gameState.soundEnabled = !gameState.soundEnabled;
+    document.getElementById('soundToggle').textContent = 
+        gameState.soundEnabled ? '🔊' : '🔇';
+}
+
+function sendMessage() {
+    const messageInput = document.getElementById('chatMessage');
+    const message = messageInput.value.trim();
+    
+    if (message) {
+        firestore.collection('games').doc(gameState.gameCode)
+            .collection('messages').add({
+                sender: gameState.playerName,
+                message: message,
+                timestamp: firebase.firestore.FieldValue.serverTimestamp()
+            });
+        messageInput.value = '';
+    }
+}
+
+function switchRoles() {
+    if (gameState.currentGame) {
+        firestore.collection('games').doc(gameState.currentGame).update({
+            host: gameState.isHost ? gameState.currentUser.uid : null,
+            guest: !gameState.isHost ? gameState.currentUser.uid : null,
+            hostName: gameState.isHost ? gameState.playerName : null,
+            guestName: !gameState.isHost ? gameState.playerName : null
+        });
+        gameState.isHost = !gameState.isHost;
+    }
+}
